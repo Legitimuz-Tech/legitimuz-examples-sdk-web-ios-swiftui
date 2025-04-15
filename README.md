@@ -6,7 +6,7 @@ A tutorial iOS project demonstrating how to integrate the Legitimuz SDK into a W
 
 This project showcases a simple implementation of an iOS app that loads the Legitimuz SDK through a WebView. It handles the necessary permissions and configurations required for features like camera access, microphone access, and location services.
 
-## Requirements
+## Used for this example:
 
 - Xcode 14.0+
 - iOS 16.0+
