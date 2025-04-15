@@ -9,14 +9,10 @@ import SwiftUI
 
 struct ContentView: View {
     var body: some View {
-        VStack {
-            Image(systemName: "globe")
-                .imageScale(.large)
-                .foregroundStyle(.tint)
-            Text("Hello, world!")
+            WebView(url: URL(string: "https://demo.legitimuz.com/liveness/")!)
+                .edgesIgnoringSafeArea(.all)
         }
-        .padding()
-    }
+
 }
 
 #Preview {
