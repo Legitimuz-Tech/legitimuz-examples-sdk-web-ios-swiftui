@@ -9,32 +9,88 @@ import SwiftUI
 
 struct ContentView: View {
     @State private var sdkStatus: String = "Ready"
+    @State private var showStatusBar: Bool = true
+    @State private var lastEvent: [String: Any] = [:]
     
     var body: some View {
-        VStack {
-            // Status indicator to show SDK events
-            Text("SDK Status: \(sdkStatus)")
-                .padding()
-                .background(Color(.systemGray6))
-                .cornerRadius(8)
-                .padding(.top, 10)
-            
-            // WebView with event handlers
+        ZStack(alignment: .top) {
+            // WebView
             WebView(
-                url: URL(string: "https://2drsc405k4gb.share.zrok.io/70b1f614-f9c3-46d8-950b-d7407ecd828f/?lang=pt")!,
+                url: URL(string: "https://demo.legitimuz.com/teste-kyc/")!,
                 onSuccess: { event in
-                    // Handle success events from the SDK
-                    print("Success event received: \(event)")
+                    print("Success: \(event)")
                     sdkStatus = "Success: \(event)"
                 },
                 onError: { event in
-                    // Handle error events from the SDK
-                    print("Error event received: \(event)")
+                    print("Error: \(event)")
                     sdkStatus = "Error: \(event)"
+                },
+                onEvent: { eventData in
+                    // Save and display the event data
+                    lastEvent = eventData
+                    if let name = eventData["name"] as? String {
+                        let status = eventData["status"] as? String ?? "unknown"
+                        sdkStatus = "\(name) (\(status))"
+                    }
                 }
             )
             .edgesIgnoringSafeArea(.all)
+            
+            // Status overlay
+            if showStatusBar {
+                StatusView(
+                    sdkStatus: sdkStatus,
+                    eventData: lastEvent,
+                    onDismiss: {
+                        withAnimation { showStatusBar = false }
+                    }
+                )
+                .transition(.move(edge: .top))
+            }
         }
+    }
+}
+
+// Extracted status view for cleaner code
+struct StatusView: View {
+    let sdkStatus: String
+    let eventData: [String: Any]
+    let onDismiss: () -> Void
+    
+    var body: some View {
+        VStack {
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("SDK Status: \(sdkStatus)")
+                        .font(.headline)
+                    
+                    if let name = eventData["name"] as? String {
+                        Text("Event: \(name)")
+                            .font(.caption)
+                        
+                        if let refId = eventData["refId"] as? String, !refId.isEmpty {
+                            Text("RefID: \(refId)")
+                                .font(.caption)
+                        }
+                    }
+                }
+                .padding()
+                .background(Color(.systemGray6))
+                .cornerRadius(8)
+                
+                Spacer()
+                
+                Button(action: onDismiss) {
+                    Image(systemName: "xmark.circle")
+                        .padding()
+                }
+            }
+            .padding(.horizontal)
+            .padding(.top, 10)
+            
+            Spacer()
+        }
+        .background(Color.black.opacity(0.01)) // Invisible touch area
     }
 }
 
