@@ -8,12 +8,39 @@ class WebViewScriptMessageHandler: NSObject, WKScriptMessageHandler {
     var onSuccessCallback: ((String) -> Void)?
     var onErrorCallback: ((String) -> Void)?
     var onEventCallback: (([String: Any]) -> Void)?
+    var onLogCallback: ((String, LogType) -> Void)?
+    
+    // Log types for different console messages
+    enum LogType {
+        case log
+        case error
+        case warning
+        case info
+        case debug
+    }
     
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
         print("Received message from JS: \(message.name) with body: \(message.body)")
         
+        // Handle console logs
+        if message.name == "consoleLog", let body = message.body as? [String: Any],
+           let type = body["type"] as? String,
+           let content = body["content"] as? String {
+            
+            let logType: LogType
+            switch type {
+            case "error": logType = .error
+            case "warn": logType = .warning
+            case "info": logType = .info
+            case "debug": logType = .debug
+            default: logType = .log
+            }
+            
+            print("JS \(type): \(content)")
+            onLogCallback?(content, logType)
+        }
         // Handle Legitimuz events with complete data
-        if message.name == "legitimuzEvent", let dict = message.body as? [String: Any] {
+        else if message.name == "legitimuzEvent", let dict = message.body as? [String: Any] {
             print("Legitimuz Event: \(dict)")
             onEventCallback?(dict)
             
@@ -59,6 +86,7 @@ struct WebView: UIViewRepresentable {
     var onSuccess: ((String) -> Void)?
     var onError: ((String) -> Void)?
     var onEvent: (([String: Any]) -> Void)?
+    var onLog: ((String, WebViewScriptMessageHandler.LogType) -> Void)?
 
     func makeCoordinator() -> Coordinator {
         Coordinator(self)
@@ -76,9 +104,70 @@ struct WebView: UIViewRepresentable {
         contentController.add(context.coordinator.messageHandler, name: "onSuccess")
         contentController.add(context.coordinator.messageHandler, name: "onError")
         contentController.add(context.coordinator.messageHandler, name: "legitimuzEvent")
+        contentController.add(context.coordinator.messageHandler, name: "consoleLog")
         configuration.userContentController = contentController
         
-        // Inject JavaScript code that will facilitate communication
+        // Inject JavaScript code for console logging
+        let consoleScript = WKUserScript(
+            source: """
+            (function() {
+                function captureLog(type, originalFunc) {
+                    return function() {
+                        // Call the original console function
+                        originalFunc.apply(console, arguments);
+                        
+                        // Convert all arguments to strings
+                        const args = Array.from(arguments).map(arg => {
+                            if (typeof arg === 'object') {
+                                try {
+                                    return JSON.stringify(arg);
+                                } catch (e) {
+                                    return String(arg);
+                                }
+                            }
+                            return String(arg);
+                        });
+                        
+                        // Send to native code
+                        window.webkit.messageHandlers.consoleLog.postMessage({
+                            type: type,
+                            content: args.join(' ')
+                        });
+                    };
+                }
+                
+                // Capture all console methods
+                console.log = captureLog('log', console.log);
+                console.error = captureLog('error', console.error);
+                console.warn = captureLog('warn', console.warn);
+                console.info = captureLog('info', console.info);
+                console.debug = captureLog('debug', console.debug);
+                
+                // Also capture uncaught errors
+                window.addEventListener('error', function(event) {
+                    window.webkit.messageHandlers.consoleLog.postMessage({
+                        type: 'error',
+                        content: 'UNCAUGHT ERROR: ' + event.message + ' at ' + event.filename + ':' + event.lineno
+                    });
+                });
+                
+                // Capture promise rejections
+                window.addEventListener('unhandledrejection', function(event) {
+                    let reason = event.reason ? event.reason.message || String(event.reason) : 'Unknown Promise Error';
+                    window.webkit.messageHandlers.consoleLog.postMessage({
+                        type: 'error',
+                        content: 'UNHANDLED PROMISE: ' + reason
+                    });
+                });
+                
+            })();
+            """,
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: false
+        )
+        contentController.addUserScript(consoleScript)
+        
+        // Inject JavaScript code that will facilitate communication with Legitimuz SDK
         let script = WKUserScript(
             source: """
             // Listen for Legitimuz events via postMessage
@@ -136,6 +225,7 @@ struct WebView: UIViewRepresentable {
             messageHandler.onSuccessCallback = parent.onSuccess
             messageHandler.onErrorCallback = parent.onError
             messageHandler.onEventCallback = parent.onEvent
+            messageHandler.onLogCallback = parent.onLog
         }
 
         // Grant camera permissions automatically
@@ -157,6 +247,24 @@ struct WebView: UIViewRepresentable {
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
             print("WebView navigation failed: \(error.localizedDescription)")
             messageHandler.onErrorCallback?("navigation_failed")
+        }
+        
+        // Handle JavaScript errors
+        func webView(_ webView: WKWebView, didReceive challenge: URLAuthenticationChallenge, completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+            completionHandler(.performDefaultHandling, nil)
+        }
+        
+        // Handle JS dialogs to capture alerts
+        func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping () -> Void) {
+            print("JS Alert: \(message)")
+            messageHandler.onLogCallback?(message, .info)
+            completionHandler()
+        }
+        
+        func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (Bool) -> Void) {
+            print("JS Confirm: \(message)")
+            messageHandler.onLogCallback?(message, .info)
+            completionHandler(true)
         }
     }
 }
