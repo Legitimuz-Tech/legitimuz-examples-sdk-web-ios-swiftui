@@ -47,20 +47,72 @@ Additionally, if you need to handle URLs that might open from the WebView:
 </array>
 ```
 
-### 2. Create WebView Component
+### 2. Create WebView Component with Legitimuz SDK Event Handling
 
-Create a custom WebView component to properly handle permissions and configure settings needed by the Legitimuz SDK:
+Create a custom WebView component to properly handle permissions and events from the Legitimuz SDK:
 
 ```swift
 import SwiftUI
 import WebKit
 import CoreLocation
 
+// Define a message handler for JavaScript communication
+class WebViewScriptMessageHandler: NSObject, WKScriptMessageHandler {
+    // Create callback closures for different event types
+    var onSuccessCallback: ((String) -> Void)?
+    var onErrorCallback: ((String) -> Void)?
+    
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        // Log all received messages for debugging
+        print("Received message from JS: \(message.name) with body: \(message.body)")
+        
+        if message.name == "onSuccess" {
+            // Handle string or dictionary
+            if let eventName = message.body as? String {
+                print("SDK Success (string): \(eventName)")
+                onSuccessCallback?(eventName)
+            } else if let dict = message.body as? [String: Any], let eventName = dict["event"] as? String {
+                print("SDK Success (dict): \(eventName)")
+                onSuccessCallback?(eventName)
+            } else {
+                print("SDK Success with unexpected format: \(message.body)")
+            }
+        } else if message.name == "onError" {
+            // Handle string or dictionary
+            if let eventName = message.body as? String {
+                print("SDK Error (string): \(eventName)")
+                onErrorCallback?(eventName)
+            } else if let dict = message.body as? [String: Any], let eventName = dict["event"] as? String {
+                print("SDK Error (dict): \(eventName)")
+                onErrorCallback?(eventName)
+            } else {
+                print("SDK Error with unexpected format: \(message.body)")
+            }
+        } else if message.name == "legitimuzEvent" {
+            // Handle Legitimuz SDK event format
+            if let dict = message.body as? [String: Any], 
+               let name = dict["name"] as? String, 
+               let status = dict["status"] as? String {
+                print("Legitimuz Event: \(name) - Status: \(status)")
+                
+                if status == "success" {
+                    onSuccessCallback?(name)
+                } else if status == "error" {
+                    onErrorCallback?(name)
+                }
+            }
+        }
+    }
+}
+
 struct WebView: UIViewRepresentable {
     let url: URL
+    // Optional callbacks to handle events from JavaScript
+    var onSuccess: ((String) -> Void)?
+    var onError: ((String) -> Void)?
 
     func makeCoordinator() -> Coordinator {
-        Coordinator()
+        Coordinator(self)
     }
 
     func makeUIView(context: Context) -> WKWebView {
@@ -68,10 +120,89 @@ struct WebView: UIViewRepresentable {
         configuration.allowsInlineMediaPlayback = true
         configuration.mediaTypesRequiringUserActionForPlayback = [] // autoplay works
         configuration.allowsPictureInPictureMediaPlayback = false
+        configuration.preferences.javaScriptEnabled = true
+
+        // Setup JavaScript message handlers
+        let contentController = WKUserContentController()
+        contentController.add(context.coordinator.messageHandler, name: "onSuccess")
+        contentController.add(context.coordinator.messageHandler, name: "onError")
+        contentController.add(context.coordinator.messageHandler, name: "legitimuzEvent")
+        configuration.userContentController = contentController
+        
+        // Inject JavaScript code that will facilitate communication
+        let script = WKUserScript(
+            source: """
+            // Log when script is injected
+            console.log('Injecting native message handlers');
+            
+            // Define global functions for direct calls
+            window.notifySuccessToNative = function(eventName) {
+                console.log('Calling success handler with: ' + eventName);
+                if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.onSuccess) {
+                    window.webkit.messageHandlers.onSuccess.postMessage(eventName);
+                } else {
+                    console.log('onSuccess handler not available');
+                }
+            };
+            
+            window.notifyErrorToNative = function(eventName) {
+                console.log('Calling error handler with: ' + eventName);
+                if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.onError) {
+                    window.webkit.messageHandlers.onError.postMessage(eventName);
+                } else {
+                    console.log('onError handler not available');
+                }
+            };
+            
+            // Intercept Legitimuz SDK postMessage events
+            (function() {
+                console.log('Setting up postMessage interceptor');
+                
+                // Create an event listener for messages
+                window.addEventListener('message', function(event) {
+                    console.log('Message received:', JSON.stringify(event.data));
+                    
+                    try {
+                        const eventData = event.data;
+                        
+                        // Check if this looks like a Legitimuz SDK event
+                        if (eventData && typeof eventData === 'object' && eventData.name) {
+                            console.log('Detected Legitimuz event:', eventData.name, 'Status:', eventData.status);
+                            
+                            // Forward to native code
+                            if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.legitimuzEvent) {
+                                window.webkit.messageHandlers.legitimuzEvent.postMessage(eventData);
+                            }
+                            
+                            // Also handle with direct callbacks for compatibility
+                            if (eventData.status === 'success') {
+                                window.notifySuccessToNative(eventData.name);
+                            } else if (eventData.status === 'error') {
+                                window.notifyErrorToNative(eventData.name);
+                            }
+                        }
+                    } catch (err) {
+                        console.error('Error processing message:', err);
+                    }
+                });
+                
+                // Log that handlers are ready
+                console.log('Native message handlers and postMessage interceptor are ready');
+            })();
+            """,
+            injectionTime: .atDocumentEnd,
+            forMainFrameOnly: false
+        )
+        contentController.addUserScript(script)
 
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.uiDelegate = context.coordinator
         webView.navigationDelegate = context.coordinator
+        
+        // Enable debugging
+        if #available(iOS 16.4, *) {
+            webView.isInspectable = true
+        }
 
         let request = URLRequest(url: url)
         webView.load(request)
@@ -82,12 +213,19 @@ struct WebView: UIViewRepresentable {
     func updateUIView(_ uiView: WKWebView, context: Context) {}
 
     class Coordinator: NSObject, WKUIDelegate, WKNavigationDelegate, CLLocationManagerDelegate {
+        let parent: WebView
+        let messageHandler = WebViewScriptMessageHandler()
         let locationManager = CLLocationManager()
 
-        override init() {
+        init(_ parent: WebView) {
+            self.parent = parent
             super.init()
             locationManager.delegate = self
             locationManager.requestWhenInUseAuthorization()
+            
+            // Set up callbacks
+            messageHandler.onSuccessCallback = parent.onSuccess
+            messageHandler.onErrorCallback = parent.onError
         }
 
         func webView(_ webView: WKWebView,
@@ -97,40 +235,58 @@ struct WebView: UIViewRepresentable {
                      decisionHandler: @escaping (WKPermissionDecision) -> Void) {
             decisionHandler(.grant)
         }
+        
+        // Add navigation delegate methods to log page loading events
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            print("WebView finished loading: \(webView.url?.absoluteString ?? "")")
+        }
+        
+        func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+            print("WebView navigation failed: \(error.localizedDescription)")
+        }
     }
 }
 ```
 
-Key configurations:
-- Enables inline media playback
-- Allows autoplay of media content
-- Sets up delegates for handling camera and location permissions
-- Automatically grants media capture permissions
+### 3. Implement ContentView with Event Handlers
 
-### 3. Implement ContentView
-
-Create a ContentView that will embed the WebView component and load the Legitimuz SDK URL:
+Create a ContentView that will embed the WebView component and handle events from the Legitimuz SDK:
 
 ```swift
 import SwiftUI
 
 struct ContentView: View {
+    @State private var sdkStatus: String = "Ready"
+    
     var body: some View {
-        // Create a WebView that loads the Legitimuz SDK URL
-        WebView(url: URL(string: "https://demo.legitimuz.com/liveness/")!)
-            // Make the WebView take up the entire screen, including areas normally reserved for system UI
-            //For testing KYC use: https://demo.legitimuz.com/teste-kyc/
+        VStack {
+            // Status indicator to show SDK events
+            Text("SDK Status: \(sdkStatus)")
+                .padding()
+                .background(Color(.systemGray6))
+                .cornerRadius(8)
+                .padding(.top, 10)
+            
+            // WebView with event handlers
+            WebView(
+                url: URL(string: "https://demo.legitimuz.com/liveness/")!,
+                // For testing KYC use: https://demo.legitimuz.com/teste-kyc/
+                onSuccess: { event in
+                    // Handle success events from the SDK
+                    print("Success event received: \(event)")
+                    sdkStatus = "Success: \(event)"
+                },
+                onError: { event in
+                    // Handle error events from the SDK
+                    print("Error event received: \(event)")
+                    sdkStatus = "Error: \(event)"
+                }
+            )
             .edgesIgnoringSafeArea(.all)
+        }
     }
 }
-
-// Preview provider for SwiftUI canvas
-#Preview {
-    ContentView()
-}
 ```
-
-The `.edgesIgnoringSafeArea(.all)` modifier ensures that the WebView fills the entire screen, which is important for the Legitimuz SDK to function properly with camera views and other full-screen features.
 
 ### 4. Setup App Entry Point
 
@@ -148,6 +304,30 @@ struct TestWebviewLegitimuzSDKApp: App {
     }
 }
 ```
+
+### 5. Understanding Legitimuz SDK Event Handling
+
+The Legitimuz SDK sends events using the `window.postMessage` API. These events have a specific format:
+
+```javascript
+{
+    name: "event-name",         // e.g., "ocr", "facematch", "close-modal"
+    status: "success" | "error", // Result status
+    refId: "reference-id"       // Optional reference ID
+}
+```
+
+Our WebView implementation intercepts these events by:
+
+1. Setting up a message event listener in JavaScript
+2. Capturing events that match the Legitimuz SDK format
+3. Forwarding them to native Swift code via message handlers
+4. Processing them in the `WebViewScriptMessageHandler` class
+
+This approach ensures that:
+- The native app can respond to all SDK events
+- The user interface can be updated based on event status
+- Debugging information is available in the console
 
 ## What Happens If You Forget Important Configurations
 
@@ -178,12 +358,18 @@ If you miss certain configurations or permissions, you'll encounter specific iss
 - **User Experience**: Camera frame doesn't utilize the full screen
 - **Fix**: Add the `.edgesIgnoringSafeArea(.all)` modifier to your WebView in ContentView
 
+### Missing JavaScript Bridge Implementation
+- **Symptom**: Native app doesn't receive events from the web SDK
+- **User Experience**: The app appears to work but doesn't respond to SDK events
+- **Fix**: Implement the message event listener and the WKScriptMessageHandler for "legitimuzEvent"
+
 ## Testing Your Integration
 
 1. Build and run the app on a physical device (simulator has limited camera capabilities)
 2. Accept the permission prompts when requested
 3. Verify that the Legitimuz SDK loads properly in the WebView
 4. Test the camera functionality to ensure it works as expected
+5. Monitor Xcode console for SDK events to confirm proper communication
 
 ## Customization Options
 
@@ -193,6 +379,7 @@ You can customize the WebView implementation based on your needs:
 - **Media Settings**: Adjust WebView media playback settings in the configuration
 - **Permissions Handling**: Customize how permissions are requested and handled
 - **UI Integration**: Modify how the WebView is presented in your app's UI
+- **Event Handling**: Add custom logic to respond to specific SDK events
 
 ## Troubleshooting
 
@@ -202,8 +389,11 @@ If you encounter issues:
 - **Camera Access**: Verify the app has been granted camera permissions during runtime
 - **WebView Configuration**: Check that the WebView is properly configured for media capture
 - **URL Loading**: Confirm the Legitimuz SDK URL is accessible and correct
+- **Event Not Received**: Check the JavaScript console for errors and verify the event listener is working
 
 ## Support
 
 For questions about the Legitimuz SDK, please contact Legitimuz support.
 
+## TODO:
+- Add how to handle events from javascript.
