@@ -4,7 +4,16 @@ A tutorial iOS project demonstrating how to integrate the Legitimuz SDK into a W
 
 ## Overview
 
-This project showcases a simple implementation of an iOS app that loads the Legitimuz SDK through a WebView. It handles the necessary permissions and configurations required for features like camera access, microphone access, and location services.
+This project showcases a simple implementation of an iOS app that loads the Legitimuz SDK through a WebView. It handles the necessary permissions and configurations required for features like camera access, microphone access, and location services. The app also implements JavaScript console logging for debugging purposes.
+
+## Features
+
+- WebView integration with the Legitimuz SDK
+- Event handling for SDK events (`success`, `error`, etc.)
+- Camera and microphone permission handling
+- Status bar displaying current SDK status
+- JavaScript console logging (logs are printed to Xcode console)
+- Handling of uncaught JavaScript errors and unhandled promise rejections
 
 ## Used for this example:
 
@@ -47,9 +56,9 @@ Additionally, if you need to handle URLs that might open from the WebView:
 </array>
 ```
 
-### 2. Create WebView Component with Legitimuz SDK Event Handling
+### 2. Create WebView Component with Legitimuz SDK Event Handling and Console Logging
 
-Create a custom WebView component to properly handle permissions and events from the Legitimuz SDK:
+Create a custom WebView component to properly handle permissions, console logs, and events from the Legitimuz SDK:
 
 ```swift
 import SwiftUI
@@ -61,39 +70,46 @@ class WebViewScriptMessageHandler: NSObject, WKScriptMessageHandler {
     // Create callback closures for different event types
     var onSuccessCallback: ((String) -> Void)?
     var onErrorCallback: ((String) -> Void)?
+    var onEventCallback: (([String: Any]) -> Void)?
+    var onLogCallback: ((String, LogType) -> Void)?
+    
+    // Log types for different console messages
+    enum LogType {
+        case log
+        case error
+        case warning
+        case info
+        case debug
+    }
     
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-        // Log all received messages for debugging
         print("Received message from JS: \(message.name) with body: \(message.body)")
         
-        if message.name == "onSuccess" {
-            // Handle string or dictionary
-            if let eventName = message.body as? String {
-                print("SDK Success (string): \(eventName)")
-                onSuccessCallback?(eventName)
-            } else if let dict = message.body as? [String: Any], let eventName = dict["event"] as? String {
-                print("SDK Success (dict): \(eventName)")
-                onSuccessCallback?(eventName)
-            } else {
-                print("SDK Success with unexpected format: \(message.body)")
+        // Handle console logs
+        if message.name == "consoleLog", let body = message.body as? [String: Any],
+           let type = body["type"] as? String,
+           let content = body["content"] as? String {
+            
+            let logType: LogType
+            switch type {
+            case "error": logType = .error
+            case "warn": logType = .warning
+            case "info": logType = .info
+            case "debug": logType = .debug
+            default: logType = .log
             }
-        } else if message.name == "onError" {
-            // Handle string or dictionary
-            if let eventName = message.body as? String {
-                print("SDK Error (string): \(eventName)")
-                onErrorCallback?(eventName)
-            } else if let dict = message.body as? [String: Any], let eventName = dict["event"] as? String {
-                print("SDK Error (dict): \(eventName)")
-                onErrorCallback?(eventName)
-            } else {
-                print("SDK Error with unexpected format: \(message.body)")
-            }
-        } else if message.name == "legitimuzEvent" {
-            // Handle Legitimuz SDK event format
-            if let dict = message.body as? [String: Any], 
-               let name = dict["name"] as? String, 
-               let status = dict["status"] as? String {
-                print("Legitimuz Event: \(name) - Status: \(status)")
+            
+            print("JS \(type): \(content)")
+            onLogCallback?(content, logType)
+        }
+        // Handle Legitimuz events
+        else if message.name == "legitimuzEvent", let dict = message.body as? [String: Any] {
+            print("Legitimuz Event: \(dict)")
+            onEventCallback?(dict)
+            
+            // Also forward to success/error for backward compatibility
+            if let name = dict["name"] as? String {
+                let status = dict["status"] as? String ?? "unknown"
                 
                 if status == "success" {
                     onSuccessCallback?(name)
@@ -102,14 +118,28 @@ class WebViewScriptMessageHandler: NSObject, WKScriptMessageHandler {
                 }
             }
         }
+        // Handle direct success/error calls
+        else if message.name == "onSuccess" {
+            if let eventName = message.body as? String {
+                print("SDK Success: \(eventName)")
+                onSuccessCallback?(eventName)
+            }
+        }
+        else if message.name == "onError" {
+            if let eventName = message.body as? String {
+                print("SDK Error: \(eventName)")
+                onErrorCallback?(eventName)
+            }
+        }
     }
 }
 
 struct WebView: UIViewRepresentable {
     let url: URL
-    // Optional callbacks to handle events from JavaScript
     var onSuccess: ((String) -> Void)?
     var onError: ((String) -> Void)?
+    var onEvent: (([String: Any]) -> Void)?
+    var onLog: ((String, WebViewScriptMessageHandler.LogType) -> Void)?
 
     func makeCoordinator() -> Coordinator {
         Coordinator(self)
@@ -118,7 +148,7 @@ struct WebView: UIViewRepresentable {
     func makeUIView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
         configuration.allowsInlineMediaPlayback = true
-        configuration.mediaTypesRequiringUserActionForPlayback = [] // autoplay works
+        configuration.mediaTypesRequiringUserActionForPlayback = []
         configuration.allowsPictureInPictureMediaPlayback = false
         configuration.preferences.javaScriptEnabled = true
 
@@ -127,83 +157,103 @@ struct WebView: UIViewRepresentable {
         contentController.add(context.coordinator.messageHandler, name: "onSuccess")
         contentController.add(context.coordinator.messageHandler, name: "onError")
         contentController.add(context.coordinator.messageHandler, name: "legitimuzEvent")
+        contentController.add(context.coordinator.messageHandler, name: "consoleLog")
         configuration.userContentController = contentController
         
-        // Inject JavaScript code that will facilitate communication
+        // Inject JavaScript code for console logging
+        let consoleScript = WKUserScript(
+            source: """
+            (function() {
+                function captureLog(type, originalFunc) {
+                    return function() {
+                        // Call the original console function
+                        originalFunc.apply(console, arguments);
+                        
+                        // Convert all arguments to strings
+                        const args = Array.from(arguments).map(arg => {
+                            if (typeof arg === 'object') {
+                                try {
+                                    return JSON.stringify(arg);
+                                } catch (e) {
+                                    return String(arg);
+                                }
+                            }
+                            return String(arg);
+                        });
+                        
+                        // Send to native code
+                        window.webkit.messageHandlers.consoleLog.postMessage({
+                            type: type,
+                            content: args.join(' ')
+                        });
+                    };
+                }
+                
+                // Capture all console methods
+                console.log = captureLog('log', console.log);
+                console.error = captureLog('error', console.error);
+                console.warn = captureLog('warn', console.warn);
+                console.info = captureLog('info', console.info);
+                console.debug = captureLog('debug', console.debug);
+                
+                // Also capture uncaught errors
+                window.addEventListener('error', function(event) {
+                    window.webkit.messageHandlers.consoleLog.postMessage({
+                        type: 'error',
+                        content: 'UNCAUGHT ERROR: ' + event.message + ' at ' + event.filename + ':' + event.lineno
+                    });
+                });
+                
+                // Capture promise rejections
+                window.addEventListener('unhandledrejection', function(event) {
+                    let reason = event.reason ? event.reason.message || String(event.reason) : 'Unknown Promise Error';
+                    window.webkit.messageHandlers.consoleLog.postMessage({
+                        type: 'error',
+                        content: 'UNHANDLED PROMISE: ' + reason
+                    });
+                });
+            })();
+            """,
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: false
+        )
+        contentController.addUserScript(consoleScript)
+        
+        // Inject JavaScript code for event handling
         let script = WKUserScript(
             source: """
-            // Log when script is injected
-            console.log('Injecting native message handlers');
-            
-            // Define global functions for direct calls
-            window.notifySuccessToNative = function(eventName) {
-                console.log('Calling success handler with: ' + eventName);
-                if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.onSuccess) {
-                    window.webkit.messageHandlers.onSuccess.postMessage(eventName);
-                } else {
-                    console.log('onSuccess handler not available');
+            // Listen for Legitimuz events via postMessage
+            window.addEventListener('message', function(event) {
+                if (event.data && typeof event.data === 'object' && event.data.name) {
+                    window.webkit.messageHandlers.legitimuzEvent.postMessage(event.data);
                 }
+            });
+            
+            // Simple success/error helpers
+            window.notifySuccessToNative = function(eventName) {
+                window.webkit.messageHandlers.onSuccess.postMessage(eventName);
             };
             
             window.notifyErrorToNative = function(eventName) {
-                console.log('Calling error handler with: ' + eventName);
-                if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.onError) {
-                    window.webkit.messageHandlers.onError.postMessage(eventName);
-                } else {
-                    console.log('onError handler not available');
-                }
+                window.webkit.messageHandlers.onError.postMessage(eventName);
             };
-            
-            // Intercept Legitimuz SDK postMessage events
-            (function() {
-                console.log('Setting up postMessage interceptor');
-                
-                // Create an event listener for messages
-                window.addEventListener('message', function(event) {
-                    console.log('Message received:', JSON.stringify(event.data));
-                    
-                    try {
-                        const eventData = event.data;
-                        
-                        // Check if this looks like a Legitimuz SDK event
-                        if (eventData && typeof eventData === 'object' && eventData.name) {
-                            console.log('Detected Legitimuz event:', eventData.name, 'Status:', eventData.status);
-                            
-                            // Forward to native code
-                            if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.legitimuzEvent) {
-                                window.webkit.messageHandlers.legitimuzEvent.postMessage(eventData);
-                            }
-                            
-                            // Also handle with direct callbacks for compatibility
-                            if (eventData.status === 'success') {
-                                window.notifySuccessToNative(eventData.name);
-                            } else if (eventData.status === 'error') {
-                                window.notifyErrorToNative(eventData.name);
-                            }
-                        }
-                    } catch (err) {
-                        console.error('Error processing message:', err);
-                    }
-                });
-                
-                // Log that handlers are ready
-                console.log('Native message handlers and postMessage interceptor are ready');
-            })();
             """,
             injectionTime: .atDocumentEnd,
             forMainFrameOnly: false
         )
         contentController.addUserScript(script)
 
+        // Create and configure WebView
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.uiDelegate = context.coordinator
         webView.navigationDelegate = context.coordinator
         
-        // Enable debugging
+        // Enable debugging on supported iOS versions
         if #available(iOS 16.4, *) {
             webView.isInspectable = true
         }
 
+        // Load the URL
         let request = URLRequest(url: url)
         webView.load(request)
 
@@ -226,63 +276,127 @@ struct WebView: UIViewRepresentable {
             // Set up callbacks
             messageHandler.onSuccessCallback = parent.onSuccess
             messageHandler.onErrorCallback = parent.onError
+            messageHandler.onEventCallback = parent.onEvent
+            messageHandler.onLogCallback = parent.onLog
         }
 
+        // Handle camera permissions
         func webView(_ webView: WKWebView,
                      requestMediaCapturePermissionFor origin: WKSecurityOrigin,
                      initiatedByFrame frame: WKFrameInfo,
                      type: WKMediaCaptureType,
                      decisionHandler: @escaping (WKPermissionDecision) -> Void) {
+            print("Camera permission granted")
             decisionHandler(.grant)
         }
         
-        // Add navigation delegate methods to log page loading events
+        // Navigation delegate methods
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-            print("WebView finished loading: \(webView.url?.absoluteString ?? "")")
+            print("WebView loaded: \(webView.url?.absoluteString ?? "")")
+            messageHandler.onSuccessCallback?("page_loaded")
         }
         
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
             print("WebView navigation failed: \(error.localizedDescription)")
+            messageHandler.onErrorCallback?("navigation_failed")
+        }
+        
+        // Handle JavaScript alerts
+        func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping () -> Void) {
+            print("JS Alert: \(message)")
+            messageHandler.onLogCallback?(message, .info)
+            completionHandler()
         }
     }
 }
 ```
 
-### 3. Implement ContentView with Event Handlers
+### 3. Implement ContentView
 
-Create a ContentView that will embed the WebView component and handle events from the Legitimuz SDK:
+Create a ContentView that will embed the WebView component, handle events, and show status:
 
 ```swift
 import SwiftUI
 
+/// Main view container for the Legitimuz SDK test application
+/// Displays a WebView with JavaScript communication capabilities and a status bar
 struct ContentView: View {
+    /// Current status message to display in the status bar
     @State private var sdkStatus: String = "Ready"
+    /// Controls visibility of the status bar overlay
+    @State private var showStatusBar: Bool = true
+    /// Stores the most recent event data received from the WebView
+    @State private var lastEvent: [String: Any] = [:]
     
     var body: some View {
-        VStack {
-            // Status indicator to show SDK events
-            Text("SDK Status: \(sdkStatus)")
-                .padding()
-                .background(Color(.systemGray6))
-                .cornerRadius(8)
-                .padding(.top, 10)
-            
-            // WebView with event handlers
+        ZStack(alignment: .top) {
+            // WebView - loads the Legitimuz demo and handles all communication
             WebView(
-                url: URL(string: "https://demo.legitimuz.com/liveness/")!,
-                // For testing KYC use: https://demo.legitimuz.com/teste-kyc/
+                url: URL(string: "https://demo.legitimuz.com/teste-kyc/")!,
                 onSuccess: { event in
-                    // Handle success events from the SDK
-                    print("Success event received: \(event)")
+                    print("Success: \(event)")
                     sdkStatus = "Success: \(event)"
                 },
                 onError: { event in
-                    // Handle error events from the SDK
-                    print("Error event received: \(event)")
+                    print("Error: \(event)")
                     sdkStatus = "Error: \(event)"
+                },
+                onEvent: { eventData in
+                    // Save and display the event data
+                    lastEvent = eventData
+                    if let name = eventData["name"] as? String {
+                        let status = eventData["status"] as? String ?? "unknown"
+                        sdkStatus = "\(name) (\(status))"
+                    }
+                },
+                onLog: { message, logType in
+                    // Log JavaScript console messages to Xcode console
+                    print("[\(logType)] \(message)")
+                    
+                    // If it's an error, update the visible status
+                    if logType == .error {
+                        sdkStatus = "Error: \(message.prefix(30))..."
+                    }
                 }
             )
             .edgesIgnoringSafeArea(.all)
+            
+            // Status bar display (can be hidden by the user)
+            if showStatusBar {
+                VStack {
+                    StatusBar(
+                        sdkStatus: sdkStatus,
+                        eventData: lastEvent,
+                        onDismiss: {
+                            withAnimation { showStatusBar = false }
+                        }
+                    )
+                    Spacer()
+                }
+                .transition(.move(edge: .top))
+                .allowsHitTesting(false) // Let touches pass through to the WebView
+            }
+            
+            // Floating button to show status when hidden
+            if !showStatusBar {
+                VStack {
+                    HStack {
+                        Spacer()
+                        Button(action: {
+                            withAnimation { showStatusBar = true }
+                        }) {
+                            Image(systemName: "info.circle.fill")
+                                .font(.title)
+                                .foregroundColor(.white)
+                                .padding(12)
+                                .background(Circle().fill(Color.blue.opacity(0.8)))
+                                .shadow(radius: 3)
+                        }
+                        .padding()
+                    }
+                    Spacer()
+                }
+            }
         }
     }
 }
@@ -305,7 +419,36 @@ struct TestWebviewLegitimuzSDKApp: App {
 }
 ```
 
-### 5. Understanding Legitimuz SDK Event Handling
+## How JavaScript Console Logging Works
+
+This implementation captures all JavaScript console output and forwards it to the native app:
+
+1. **Console Method Interception**: All `console.log`, `console.error`, `console.warn`, `console.info`, and `console.debug` calls are intercepted
+2. **Error Event Capture**: Uncaught JavaScript errors and unhandled promise rejections are also captured
+3. **Native Forwarding**: All console output is sent to the native app via `webkit.messageHandlers.consoleLog`
+4. **Log Processing**: The `WebViewScriptMessageHandler` converts these messages to native log entries
+5. **Xcode Console Output**: All logs are printed to the Xcode console with their type
+
+This provides several benefits:
+- Full visibility into JavaScript execution
+- Capture of errors that might otherwise be invisible
+- Ability to correlate JavaScript issues with SDK behavior
+- Enhanced debugging capabilities for web content
+
+### Example Log Format
+
+Logs appear in the Xcode console with this format:
+
+```
+[log] This is a regular console.log message
+[error] This is a console.error message
+[warning] This is a console.warn message
+[info] This is a console.info message
+[debug] This is a console.debug message
+[error] UNCAUGHT ERROR: ReferenceError: undefinedVariable is not defined at https://example.com:123
+```
+
+## Understanding SDK Event Handling
 
 The Legitimuz SDK sends events using the `window.postMessage` API. These events have a specific format:
 
@@ -390,10 +533,8 @@ If you encounter issues:
 - **WebView Configuration**: Check that the WebView is properly configured for media capture
 - **URL Loading**: Confirm the Legitimuz SDK URL is accessible and correct
 - **Event Not Received**: Check the JavaScript console for errors and verify the event listener is working
+- **No Console Logs**: Ensure the console logging script is injected at document start and the message handler is registered
 
 ## Support
 
 For questions about the Legitimuz SDK, please contact Legitimuz support.
-
-## TODO:
-- Add how to handle events from javascript.
