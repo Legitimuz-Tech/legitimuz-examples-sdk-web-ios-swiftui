@@ -119,6 +119,7 @@ struct ContentView: View {
         // Create a WebView that loads the Legitimuz SDK URL
         WebView(url: URL(string: "https://demo.legitimuz.com/liveness/")!)
             // Make the WebView take up the entire screen, including areas normally reserved for system UI
+            //For testing KYC use: https://demo.legitimuz.com/teste-kyc/
             .edgesIgnoringSafeArea(.all)
     }
 }
